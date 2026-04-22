@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Environments
+.env
+.venv
+.venv_backend
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+local.env
+
+# Models & Large Datasets (Uncomment if you want to exclude model files, but since it's an AI project, you might want to keep the small joblib files)
+# *.joblib
+# *.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+
+# Backend (FastAPI/Uvicorn etc)
+backend/__pycache__/
