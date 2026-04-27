@@ -9,17 +9,29 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from typing import Optional
 from pathlib import Path
 
 import google.generativeai as genai
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
+from .auth import get_current_user, router as auth_router
+from .database import SessionLocal, init_db
+from .logger import logger
 from .ml_context import ensure_sklearn_model, ml_context_paragraph
+from .models import Analysis, Goal
 from .submission_csv import append_analyze_submission
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -116,7 +128,88 @@ def _build_prompt(
             }}"""
 
 
-def _gemini_text(response) -> str:
+def _build_learning_path_prompt(
+    ortalamalar: dict[str, int],
+    rutinler: RutinlerIn,
+    ml_extra: str | None,
+) -> str:
+    extra = f"\nEk bağlam: {ml_extra}\n" if ml_extra else ""
+    return f"""
+            Sen uzman bir eğitim koçusun. Aşağıdaki öğrenci profili için 4 haftalık kişiselleştirilmiş öğrenme yolu hazırla.
+
+            Ders ortalamaları:
+            Matematik: {ortalamalar["mat"]}/100
+            Fizik: {ortalamalar["fiz"]}/100
+            Kimya: {ortalamalar["kim"]}/100
+
+            Günlük rutin:
+            Uyku: {rutinler.uyku} saat
+            Ders Çalışma: {rutinler.calisma} saat
+            {extra}
+            ÖNEMLİ KURALLAR:
+            - Zayıf derslere daha fazla saat ayır, güçlü dersleri korumaya yönelik plan yap.
+            - Her hafta 3 ders için ayrı görev listesi oluştur (haftada 5-7 görev gibi).
+            - Görevler somut olsun: "Türev konu tekrarı + 20 soru çöz" gibi. "Çalış" yetmez.
+            - Haftalık toplam çalışma saatini öğrencinin günlük çalışma saatine uygun hesapla.
+            - Her hafta için ayrıca kısa bir motivasyon notu ekle.
+
+            Sadece şu JSON formatını döndür, başka metin yazma. JSON içinde "..." kullanma:
+            {{
+                "ozet": "Genel strateji 2-3 cümle",
+                "haftalikToplamSaat": 21,
+                "haftalar": [
+                    {{
+                        "hafta": 1,
+                        "odak": "Bu hafta hangi derse ağırlık verilecek",
+                        "gorevler": {{
+                            "matematik": ["Görev 1", "Görev 2", "Görev 3"],
+                            "fizik": ["Görev 1", "Görev 2"],
+                            "kimya": ["Görev 1", "Görev 2"]
+                        }},
+                        "motivasyon": "Kısa motivasyon notu"
+                    }},
+                    {{
+                        "hafta": 2,
+                        "odak": "...",
+                        "gorevler": {{ "matematik": [...], "fizik": [...], "kimya": [...] }},
+                        "motivasyon": "..."
+                    }},
+                    {{
+                        "hafta": 3,
+                        "odak": "...",
+                        "gorevler": {{ "matematik": [...], "fizik": [...], "kimya": [...] }},
+                        "motivasyon": "..."
+                    }},
+                    {{
+                        "hafta": 4,
+                        "odak": "...",
+                        "gorevler": {{ "matematik": [...], "fizik": [...], "kimya": [...] }},
+                        "motivasyon": "..."
+                    }}
+                ]
+            }}"""
+
+
+def _gemini_generate(model, prompt: str, max_retries: int = 3) -> str:
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(prompt)
+            return _gemini_text_raw(response)
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg:
+                import re as _re
+                m = _re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", msg)
+                wait = int(m.group(1)) if m else 15
+                wait = min(wait, 60)
+                if attempt < max_retries - 1:
+                    time.sleep(wait + 2)
+                    continue
+            raise
+    raise RuntimeError("Gemini yanıt vermedi")
+
+
+def _gemini_text_raw(response) -> str:
     try:
         return response.text or ""
     except ValueError:
@@ -133,11 +226,7 @@ def _parse_ai_json(text: str) -> dict:
     return json.loads(t)
 
 
-_cached_gemini_model: str | None = None
-
-
 def _pick_model_name() -> str:
-    global _cached_gemini_model
     key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
     if not key:
         raise HTTPException(
@@ -149,21 +238,51 @@ def _pick_model_name() -> str:
             ),
         )
     genai.configure(api_key=key)
-    if _cached_gemini_model:
-        return _cached_gemini_model
-    for m in genai.list_models():
-        methods = getattr(m, "supported_generation_methods", None) or []
-        name = (m.name or "").lower()
-        if "generatecontent" in [x.lower() for x in methods] and "gemini" in name:
-            _cached_gemini_model = m.name
-            return m.name
-    raise HTTPException(status_code=503, detail="Uygun Gemini modeli bulunamadı")
+    return "models/gemini-2.5-flash"
 
+
+_allowed_origins = [
+    o.strip()
+    for o in os.environ.get("ALLOWED_ORIGINS", "http://127.0.0.1:8000,http://localhost:8000").split(",")
+    if o.strip()
+]
+
+limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(title="EduAI Backend", version="1.0.0")
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+init_db()
+app.include_router(auth_router)
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning(f"Rate limit aşıldı: {request.client.host} → {request.url.path}")
+    return JSONResponse(status_code=429, content={"detail": "Çok fazla istek gönderildi. Lütfen bekleyin."})
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404 and not request.url.path.startswith("/api") and not request.url.path.startswith("/auth"):
+        return FileResponse(PROJECT_ROOT / "404.html", status_code=404)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    logger.error(f"Beklenmeyen hata: {request.url.path} → {exc!r}")
+    return JSONResponse(status_code=500, content={"detail": "Sunucu hatası oluştu. Lütfen tekrar deneyin."})
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration = round((time.time() - start) * 1000)
+    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration}ms) [{request.client.host}]")
+    return response
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -177,7 +296,8 @@ def health():
 
 
 @app.post("/api/analyze")
-def analyze(body: AnalyzeRequest):
+@limiter.limit("10/minute")
+def analyze(request: Request, body: AnalyzeRequest, current_user=Depends(get_current_user)):
     for ders, vals in (
         ("mat", body.notlar.mat),
         ("fiz", body.notlar.fiz),
@@ -220,11 +340,10 @@ def analyze(body: AnalyzeRequest):
     model_name = _pick_model_name()
     model = genai.GenerativeModel(model_name)
     try:
-        response = model.generate_content(prompt)
+        raw = _gemini_generate(model, prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini hatası: {e!s}") from e
 
-    raw = _gemini_text(response).strip()
     if not raw:
         raise HTTPException(status_code=502, detail="Gemini boş yanıt döndü")
 
@@ -243,6 +362,24 @@ def analyze(body: AnalyzeRequest):
         body.rutinler.uyku,
     )
 
+    genel_ort = (ortalamalar["mat"] + ortalamalar["fiz"] + ortalamalar["kim"]) // 3
+    try:
+        db = SessionLocal()
+        db.add(Analysis(
+            user_id=current_user.id,
+            mat_avg=ortalamalar["mat"],
+            fiz_avg=ortalamalar["fiz"],
+            kim_avg=ortalamalar["kim"],
+            genel_ort=genel_ort,
+            uyku=body.rutinler.uyku,
+            calisma=body.rutinler.calisma,
+            ai_json=json.dumps(ai, ensure_ascii=False),
+        ))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
     return {
         "ai": ai,
         "ortalamalar": ortalamalar,
@@ -252,11 +389,158 @@ def analyze(body: AnalyzeRequest):
     }
 
 
+@app.get("/api/analytics")
+def analytics(current_user=Depends(get_current_user)):
+    db = SessionLocal()
+    rows = (
+        db.query(Analysis)
+        .filter(Analysis.user_id == current_user.id)
+        .order_by(Analysis.created_at.asc())
+        .all()
+    )
+    db.close()
+    return {
+        "analyses": [
+            {
+                "id": r.id,
+                "mat": r.mat_avg,
+                "fiz": r.fiz_avg,
+                "kim": r.kim_avg,
+                "genel": r.genel_ort,
+                "uyku": r.uyku,
+                "calisma": r.calisma,
+                "tarih": r.created_at.strftime("%d.%m.%Y %H:%M") if r.created_at else "",
+                "ai": json.loads(r.ai_json) if r.ai_json else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+class GoalIn(BaseModel):
+    baslik: str
+    aciklama: str = ""
+
+class GoalPatch(BaseModel):
+    tamamlandi: Optional[int] = None
+    baslik: Optional[str] = None
+    aciklama: Optional[str] = None
+
+@app.get("/api/goals")
+def get_goals(current_user=Depends(get_current_user)):
+    db = SessionLocal()
+    rows = db.query(Goal).filter(Goal.user_id == current_user.id).order_by(Goal.created_at.desc()).all()
+    db.close()
+    return {"goals": [{"id": r.id, "baslik": r.baslik, "aciklama": r.aciklama, "tamamlandi": r.tamamlandi, "tarih": r.created_at.strftime("%d.%m.%Y") if r.created_at else ""} for r in rows]}
+
+@app.post("/api/goals", status_code=201)
+def create_goal(body: GoalIn, current_user=Depends(get_current_user)):
+    if not body.baslik.strip():
+        raise HTTPException(status_code=400, detail="Başlık boş olamaz")
+    db = SessionLocal()
+    goal = Goal(user_id=current_user.id, baslik=body.baslik.strip(), aciklama=body.aciklama.strip())
+    db.add(goal)
+    db.commit()
+    db.refresh(goal)
+    result = {"id": goal.id, "baslik": goal.baslik, "aciklama": goal.aciklama, "tamamlandi": goal.tamamlandi, "tarih": goal.created_at.strftime("%d.%m.%Y") if goal.created_at else ""}
+    db.close()
+    return result
+
+@app.patch("/api/goals/{goal_id}")
+def update_goal(goal_id: int, body: GoalPatch, current_user=Depends(get_current_user)):
+    db = SessionLocal()
+    goal = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == current_user.id).first()
+    if not goal:
+        db.close()
+        raise HTTPException(status_code=404, detail="Hedef bulunamadı")
+    if body.tamamlandi is not None:
+        goal.tamamlandi = body.tamamlandi
+    if body.baslik is not None:
+        goal.baslik = body.baslik.strip()
+    if body.aciklama is not None:
+        goal.aciklama = body.aciklama.strip()
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+@app.delete("/api/goals/{goal_id}")
+def delete_goal(goal_id: int, current_user=Depends(get_current_user)):
+    db = SessionLocal()
+    goal = db.query(Goal).filter(Goal.id == goal_id, Goal.user_id == current_user.id).first()
+    if not goal:
+        db.close()
+        raise HTTPException(status_code=404, detail="Hedef bulunamadı")
+    db.delete(goal)
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.post("/api/learning-path")
+def learning_path(body: AnalyzeRequest, current_user=Depends(get_current_user)):
+    for ders, vals in (
+        ("mat", body.notlar.mat),
+        ("fiz", body.notlar.fiz),
+        ("kim", body.notlar.kim),
+    ):
+        for v in vals:
+            if v < 0 or v > 100:
+                raise HTTPException(status_code=400, detail=f"{ders} notları 0–100 aralığında olmalı")
+
+    ortalamalar = {
+        "mat": _avg(body.notlar.mat),
+        "fiz": _avg(body.notlar.fiz),
+        "kim": _avg(body.notlar.kim),
+    }
+    try:
+        ensure_sklearn_model(PROJECT_ROOT)
+    except Exception:
+        pass
+
+    ml_extra, _ = ml_context_paragraph(
+        PROJECT_ROOT,
+        ortalamalar["mat"],
+        ortalamalar["fiz"],
+        ortalamalar["kim"],
+        body.rutinler.calisma,
+        body.rutinler.uyku,
+    )
+
+    prompt = _build_learning_path_prompt(ortalamalar, body.rutinler, ml_extra)
+    model_name = _pick_model_name()
+    model = genai.GenerativeModel(model_name)
+    try:
+        raw = _gemini_generate(model, prompt)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gemini hatası: {e!s}") from e
+
+    if not raw:
+        raise HTTPException(status_code=502, detail="Gemini boş yanıt döndü")
+
+    try:
+        plan = _parse_ai_json(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail="Öğrenme yolu JSON olarak çözülemedi; tekrar deneyin.",
+        ) from e
+
+    return {"plan": plan, "ortalamalar": ortalamalar, "user": current_user.email}
+
+
 # Arayüzü buradan aç: CSV güncellenince Live Server sayfayı yenilemez (http://127.0.0.1:8000/)
 @app.get("/")
 def serve_index():
     return FileResponse(PROJECT_ROOT / "index.html")
 
+
+@app.get("/login")
+def serve_login():
+    return FileResponse(PROJECT_ROOT / "login.html")
+
+@app.get("/reset")
+def serve_reset():
+    return FileResponse(PROJECT_ROOT / "reset.html")
 
 @app.get("/style.css")
 def serve_css():

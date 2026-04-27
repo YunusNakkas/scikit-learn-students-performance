@@ -193,3 +193,59 @@ body{
   padding: 16px 20px;
   overflow-y: auto;
 }
+
+/* ── MOBİL UYUMLULUK ────────────────────────────────── */
+@media (max-width: 768px) {
+  body { overflow: auto; height: auto; min-height: 100vh; }
+
+  .shell { flex-direction: column; height: auto; min-height: 100vh; overflow: visible; }
+
+  /* Sidebar → üst bar */
+  .sidebar {
+    width: 100%; min-width: unset;
+    flex-direction: row;
+    align-items: center;
+    padding: 10px 14px;
+    border-right: none;
+    border-bottom: 0.5px solid rgba(0,0,0,0.1);
+    gap: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .logo { margin-bottom: 0; padding-bottom: 0; border-bottom: none; font-size: 14px; margin-right: 12px; flex-shrink: 0; }
+  .nlabel { display: none; }
+  .nitem { padding: 5px 8px; font-size: 12px; flex-shrink: 0; }
+  .sfooter { margin-top: 0; border-top: none; padding-top: 0; margin-left: auto; flex-shrink: 0; }
+
+  /* Ana içerik dikey */
+  .main { overflow: visible; }
+  .tbar { height: auto; min-height: 44px; padding: 8px 14px; flex-wrap: wrap; gap: 8px; }
+  .content { flex-direction: column; overflow: visible; height: auto; }
+
+  /* Sol panel (not girişi) tam genişlik */
+  .lpanel {
+    width: 100%; min-width: unset;
+    border-right: none;
+    border-bottom: 0.5px solid rgba(0,0,0,0.1);
+    padding: 12px;
+    overflow-y: visible;
+    max-height: none;
+  }
+
+  /* Sağ panel (AI sonuçları) tam genişlik */
+  .rpanel { overflow: visible; }
+  .rarea { overflow-y: visible; padding: 14px; padding-bottom: 40px; }
+
+  /* Grid 1 sütuna düş */
+  .sgrid { grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* Modal tam ekran */
+  .modal-box { width: 96%; max-height: 90vh; }
+
+  /* Butonlar tam genişlik */
+  .abtn { font-size: 15px; padding: 14px; }
+
+  /* Skor kutusu biraz küçülsün */
+  .ginput { width: 50px; }
+}
+

@@ -1,14 +1,13 @@
-import joblib
+import joblib# type: ignore
 import pandas as pd
-import numpy as np
+import numpy as np# type: ignore
 import os
-import google.generativeai as genai
+import google.generativeai as genai# type: ignore
 from sklearn.cluster import KMeans
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline# type: ignore
 from sklearn.preprocessing import StandardScaler
 
-# 🚨 DİKKAT: API anahtarını buraya eklemeyi unutma
-API_KEY = "AIzaSyAz1YVhIALWUiW7DhYmzSi8CF7CWU7XIt8"
+API_KEY = os.environ.get("GEMINI_API_KEY", "")
 genai.configure(api_key=API_KEY)
 
 CSV_PATH = "StudentsPerformance_Extended.csv"
@@ -26,8 +25,8 @@ def veri_setini_hazirla_ve_egit():
 
     if not os.path.exists(MODEL_PATH):
         print("🧠 Yeni verilere göre Makine Öğrenmesi Modeli (Random Forest) eğitiliyor...")
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.model_selection import cross_val_score, StratifiedKFold
+        from sklearn.ensemble import RandomForestClassifier# type: ignore
+        from sklearn.model_selection import cross_val_score, StratifiedKFold# type: ignore
         X = df[FEATURE_COLS]
         
         # Etiket: Not ortalamasına göre 5. sınıfa ayır

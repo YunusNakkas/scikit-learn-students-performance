@@ -1,12 +1,66 @@
-    /**
-     * Canlı ortam uyumlu API Base belirleme:
-     * file:// veya Live Server (örn: 5500) kullanılıyorsa API localhost:8000'e gider.
-     * FastAPI kendi adresi (8000) üzerinden açıldıysa veya yayınlanmış (canlı) sunucudaysa sayfayla aynı domaine ("") gider.
-     */
-    const API_BASE = 
+    const API_BASE =
         window.location.protocol === "file:" || (window.location.hostname === "127.0.0.1" && window.location.port !== "8000")
             ? "http://127.0.0.1:8000"
             : "";
+
+    // ── AUTH ──────────────────────────────────────────────
+    // Token sadece bellekte tutulur — sayfa yenilenince sıfırlanır, login'e yönlendirir
+    localStorage.removeItem("eduai_token"); // eski oturumdan kalma temizle
+    let _memToken = sessionStorage.getItem("_eduai_t") || null;
+    if (_memToken) sessionStorage.removeItem("_eduai_t"); // bir kez okunur, hemen silinir
+
+    function getToken() { return _memToken; }
+    function clearToken() { _memToken = null; }
+
+    function authHeaders() {
+        return _memToken ? { "Authorization": `Bearer ${_memToken}` } : {};
+    }
+
+    function updateSidebarUser(data) {
+        const fullName = [data.ad, data.soyad].filter(Boolean).join(" ");
+        const display = fullName || data.email || "--";
+        const initials = fullName
+            ? (data.ad[0] + (data.soyad ? data.soyad[0] : "")).toUpperCase()
+            : (data.email || "?").slice(0, 2).toUpperCase();
+        document.getElementById("userAvatar").innerText = initials;
+        document.getElementById("userDisplayName").innerText = display;
+    }
+
+    function hideSplash() {
+        const s = document.getElementById("loadingScreen");
+        if (s) s.style.display = "none";
+    }
+
+    async function checkAuth() {
+        const token = getToken();
+        if (!token) { window.location.replace("/login"); return; }
+        try {
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 5000);
+            const res = await fetch(`${API_BASE}/auth/me`, {
+                headers: { "Authorization": `Bearer ${token}` },
+                signal: controller.signal
+            });
+            clearTimeout(tid);
+            if (!res.ok) { clearToken(); window.location.replace("/login"); return; }
+            const data = await res.json();
+            updateSidebarUser(data);
+            document.getElementById("appShell").style.display = "flex";
+            hideSplash();
+        } catch (err) {
+            console.error("Auth hatası:", err);
+            clearToken();
+            window.location.replace("/login");
+        }
+    }
+
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+        clearToken();
+        window.location.replace("/login");
+    });
+
+    checkAuth();
+    // ── AUTH SON ──────────────────────────────────────────
 
     // Modalı kapatma işlemleri
     const modal = document.getElementById('aiModal');
@@ -90,23 +144,81 @@
 
     const navIlerleme = document.getElementById('nav-ilerleme');
     if (navIlerleme) {
-        navIlerleme.addEventListener('click', () => {
-            const sgrid = document.getElementById('ui-ilerleme-sgrid');
-            const dcard = document.getElementById('ui-ilerleme-dcard');
-            
-            if (sgrid && dcard) {
-                modalTitle.innerText = "İlerleme Raporu";
-                modalTitle.style.color = '#185FA5';
-                modalDot.style.backgroundColor = '#378ADD';
-                
+        navIlerleme.addEventListener('click', async () => {
+            modalTitle.innerText = "İlerleme Raporu";
+            modalTitle.style.color = '#185FA5';
+            modalDot.style.backgroundColor = '#378ADD';
+            modalBody.innerHTML = `<div style="text-align:center;padding:30px;color:#888780;">Yükleniyor...</div>`;
+            modal.classList.add('show');
+
+            try {
+                const res = await fetch(`${API_BASE}/api/analytics`, { headers: authHeaders() });
+                if (!res.ok) throw new Error();
+                const data = await res.json();
+                const analyses = data.analyses || [];
+
+                if (!analyses.length) {
+                    modalBody.innerHTML = `
+                        <div style="text-align:center;padding:40px 20px;color:#888780;">
+                            <div style="font-size:32px;margin-bottom:12px;">📊</div>
+                            <div style="font-size:14px;">Henüz analiz yapılmamış.<br>İlk analizini yaptıktan sonra burada görünecek.</div>
+                        </div>`;
+                    return;
+                }
+
+                const last  = analyses[analyses.length - 1];
+                const first = analyses[0];
+                const trend = analyses.length > 1 ? last.genel - first.genel : null;
+                const trendColor = trend >= 0 ? '#1D9E75' : '#d94f4f';
+
+                const dersler = [
+                    { isim: 'Matematik', deger: last.mat, renk: '#1D9E75' },
+                    { isim: 'Fizik',     deger: last.fiz, renk: '#378ADD' },
+                    { isim: 'Kimya',     deger: last.kim, renk: '#D85A30' },
+                ];
+                const guclu = [...dersler].sort((a,b) => b.deger - a.deger)[0];
+                const zayif = [...dersler].sort((a,b) => a.deger - b.deger)[0];
+
                 modalBody.innerHTML = `
-                    <div style="display:flex; flex-direction:column; gap:16px;">
-                        ${sgrid.outerHTML}
-                        ${dcard.outerHTML}
+                    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;">
+                        <div style="background:#f5f5f3;border-radius:10px;padding:12px;text-align:center;">
+                            <div style="font-size:11px;color:#888780;margin-bottom:4px;">Genel Ortalama</div>
+                            <div style="font-size:24px;font-weight:700;color:#1D9E75;">${last.genel}</div>
+                            <div style="font-size:10px;color:#888780;">Son analiz</div>
+                        </div>
+                        <div style="background:#f5f5f3;border-radius:10px;padding:12px;text-align:center;">
+                            <div style="font-size:11px;color:#888780;margin-bottom:4px;">En Güçlü</div>
+                            <div style="font-size:18px;font-weight:700;color:#0F6E56;">${guclu.isim}</div>
+                            <div style="font-size:10px;color:#888780;">Ort. ${guclu.deger}/100</div>
+                        </div>
+                        <div style="background:#f5f5f3;border-radius:10px;padding:12px;text-align:center;">
+                            <div style="font-size:11px;color:#888780;margin-bottom:4px;">Gelişmeli</div>
+                            <div style="font-size:18px;font-weight:700;color:#185FA5;">${zayif.isim}</div>
+                            <div style="font-size:10px;color:#888780;">Ort. ${zayif.deger}/100</div>
+                        </div>
+                    </div>
+
+                    <div style="background:#fff;border:1px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px;margin-bottom:12px;">
+                        <div style="font-size:13px;font-weight:600;color:#1a1a18;margin-bottom:14px;">Son Analiz Performansı
+                            <span style="font-size:11px;font-weight:400;color:#888780;margin-left:6px;">${last.tarih}</span>
+                        </div>
+                        ${dersler.map(d => `
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                            <div style="font-size:12px;color:#5f5e5a;min-width:68px;">${d.isim}</div>
+                            <div style="flex:1;background:#f0f0ee;border-radius:20px;height:7px;">
+                                <div style="width:${d.deger}%;background:${d.renk};height:7px;border-radius:20px;transition:width 0.5s;"></div>
+                            </div>
+                            <div style="font-size:12px;font-weight:600;color:${d.renk};min-width:28px;text-align:right;">${d.deger}</div>
+                        </div>`).join('')}
+                        ${trend !== null ? `
+                        <div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(0,0,0,0.06);font-size:12px;color:#5f5e5a;">
+                            İlk analizden bu yana: <span style="color:${trendColor};font-weight:700;">${trend >= 0 ? '+' : ''}${trend} puan</span>
+                            <span style="color:#888780;"> (${analyses.length} analiz)</span>
+                        </div>` : ''}
                     </div>
                 `;
-                
-                modal.classList.add('show');
+            } catch {
+                modalBody.innerHTML = `<div style="color:#d94f4f;padding:20px;text-align:center;">Veriler yüklenemedi.</div>`;
             }
         });
     }
@@ -178,7 +290,7 @@
 
             const response = await fetch(`${API_BASE}/api/analyze`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...authHeaders() },
                 body: JSON.stringify({ notlar, rutinler })
             });
 
@@ -296,6 +408,8 @@
             alan.style.opacity = "1";
             alan.style.pointerEvents = "auto";
             document.getElementById('pdfBtn').style.display = "block";
+            document.getElementById('pathBtn').style.display = "block";
+            window._lastInput = { notlar, rutinler };
 
         } catch (error) {
             alert("İşlem sırasında bir hata oluştu:\n" + error.message);
@@ -304,6 +418,77 @@
             btn.innerText = "Tekrar Analiz Et";
         }
     });
+
+    document.getElementById('pathBtn').addEventListener('click', async () => {
+        const btn = document.getElementById('pathBtn');
+        if (!window._lastInput) {
+            alert("Önce analiz yapmalısınız.");
+            return;
+        }
+        btn.disabled = true;
+        const original = btn.innerText;
+        btn.innerText = "Hazırlanıyor...";
+        try {
+            const res = await fetch(`${API_BASE}/api/learning-path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...authHeaders() },
+                body: JSON.stringify(window._lastInput)
+            });
+            if (!res.ok) {
+                let msg = `Sunucu hatası (${res.status})`;
+                try { const e = await res.json(); if (typeof e.detail === "string") msg = e.detail; } catch {}
+                throw new Error(msg);
+            }
+            const data = await res.json();
+            renderLearningPath(data.plan);
+        } catch (err) {
+            alert("Öğrenme yolu oluşturulamadı:\n" + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerText = original;
+        }
+    });
+
+    function renderLearningPath(plan) {
+        if (!plan || !Array.isArray(plan.haftalar)) {
+            alert("Geçersiz öğrenme yolu yanıtı.");
+            return;
+        }
+        const colors = { matematik: "#1D9E75", fizik: "#378ADD", kimya: "#D85A30" };
+        const haftalarHtml = plan.haftalar.map(h => {
+            const gorevlerHtml = ["matematik","fizik","kimya"].map(ders => {
+                const items = (h.gorevler && h.gorevler[ders]) || [];
+                if (!items.length) return "";
+                return `
+                    <div style="margin-top:10px;">
+                        <div style="font-size:12px;font-weight:600;color:${colors[ders]};text-transform:capitalize;margin-bottom:6px;">${ders}</div>
+                        ${items.map(t => `<div class="aitem"><div class="adot" style="background:${colors[ders]};"></div><div class="atext">${t}</div></div>`).join("")}
+                    </div>`;
+            }).join("");
+            return `
+                <div style="border:1px solid rgba(0,0,0,0.1);border-radius:10px;padding:14px;margin-bottom:14px;background:#fff;">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                        <div style="width:28px;height:28px;border-radius:8px;background:#ede9fe;color:#6d28d9;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;">${h.hafta}</div>
+                        <div style="flex:1;">
+                            <div style="font-size:14px;font-weight:600;color:#1a1a18;">Hafta ${h.hafta}</div>
+                            <div style="font-size:12px;color:#5f5e5a;">${h.odak || ""}</div>
+                        </div>
+                    </div>
+                    ${gorevlerHtml}
+                    ${h.motivasyon ? `<div style="margin-top:12px;padding:10px;background:#f5f5f3;border-radius:8px;font-size:12px;color:#5f5e5a;font-style:italic;">💡 ${h.motivasyon}</div>` : ""}
+                </div>`;
+        }).join("");
+
+        modalTitle.innerText = "📚 Kişisel Öğrenme Yolun";
+        modalTitle.style.color = "#6d28d9";
+        modalDot.style.backgroundColor = "#8b5cf6";
+        modalBody.innerHTML = `
+            ${plan.ozet ? `<div style="padding:12px;background:#f3e8ff;border:1px solid #d8b4fe;border-radius:10px;margin-bottom:14px;font-size:13px;color:#6d28d9;line-height:1.5;">${plan.ozet}</div>` : ""}
+            ${plan.haftalikToplamSaat ? `<div style="font-size:12px;color:#5f5e5a;margin-bottom:14px;">Haftalık toplam çalışma: <b>${plan.haftalikToplamSaat} saat</b></div>` : ""}
+            ${haftalarHtml}
+        `;
+        modal.classList.add('show');
+    }
 
     document.getElementById('pdfBtn').addEventListener('click', () => {
         const btn = document.getElementById('pdfBtn');
@@ -320,3 +505,321 @@
             btn.innerText = "📄 PDF İndir";
         });
     });
+
+    // ── RAPORLAR ──────────────────────────────────────────
+    let _analyticsChart = null;
+
+    document.getElementById('nav-raporlar').addEventListener('click', async () => {
+        modalTitle.innerText = "📊 Öğrenme Analitiği";
+        modalTitle.style.color = "#E74C3C";
+        modalDot.style.backgroundColor = "#E74C3C";
+        modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:#888780;">Yükleniyor...</div>`;
+        modal.classList.add('show');
+
+        try {
+            const res = await fetch(`${API_BASE}/api/analytics`, { headers: authHeaders() });
+            if (!res.ok) throw new Error("Veri alınamadı");
+            const data = await res.json();
+            renderAnalytics(data.analyses);
+        } catch (err) {
+            modalBody.innerHTML = `<div style="color:#d94f4f;padding:20px;">${err.message}</div>`;
+        }
+    });
+
+    window._lastAnalyses = [];
+
+    function renderAnalytics(analyses) {
+        window._lastAnalyses = analyses;
+        if (!analyses || analyses.length === 0) {
+            modalBody.innerHTML = `
+                <div style="text-align:center;padding:40px 20px;color:#888780;">
+                    <div style="font-size:32px;margin-bottom:12px;">📭</div>
+                    <div style="font-size:14px;">Henüz analiz yapılmamış.<br>İlk analizini yaptıktan sonra burada görünecek.</div>
+                </div>`;
+            return;
+        }
+
+        const labels = analyses.map((a, i) => a.tarih || `Analiz ${i+1}`);
+        const matData = analyses.map(a => a.mat);
+        const fizData = analyses.map(a => a.fiz);
+        const kimData = analyses.map(a => a.kim);
+        const genelData = analyses.map(a => a.genel);
+
+        const last = analyses[analyses.length - 1];
+        const first = analyses[0];
+        const trend = analyses.length > 1 ? last.genel - first.genel : null;
+        const trendHtml = trend !== null
+            ? `<span style="color:${trend >= 0 ? '#1D9E75' : '#d94f4f'};font-weight:600;">${trend >= 0 ? '+' : ''}${trend} puan</span>`
+            : '';
+
+        modalBody.innerHTML = `
+            <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:100px;background:#f5f5f3;border-radius:10px;padding:12px;text-align:center;">
+                    <div style="font-size:11px;color:#888780;margin-bottom:4px;">Toplam Analiz</div>
+                    <div style="font-size:22px;font-weight:700;color:#1a1a18;">${analyses.length}</div>
+                </div>
+                <div style="flex:1;min-width:100px;background:#f5f5f3;border-radius:10px;padding:12px;text-align:center;">
+                    <div style="font-size:11px;color:#888780;margin-bottom:4px;">Son Genel Ort.</div>
+                    <div style="font-size:22px;font-weight:700;color:#1D9E75;">${last.genel}</div>
+                </div>
+                ${trend !== null ? `
+                <div style="flex:1;min-width:100px;background:#f5f5f3;border-radius:10px;padding:12px;text-align:center;">
+                    <div style="font-size:11px;color:#888780;margin-bottom:4px;">İlerleme</div>
+                    <div style="font-size:22px;font-weight:700;">${trendHtml}</div>
+                </div>` : ''}
+            </div>
+            <div style="background:#fff;border:1px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px;margin-bottom:14px;">
+                <div style="font-size:13px;font-weight:600;color:#1a1a18;margin-bottom:12px;">Ders Ortalamaları Trendi</div>
+                <canvas id="analyticsChart" height="200"></canvas>
+            </div>
+            <div style="background:#fff;border:1px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px;">
+                <div style="font-size:13px;font-weight:600;color:#1a1a18;margin-bottom:10px;">Geçmiş Analizler</div>
+                ${analyses.slice().reverse().map(a => `
+                    <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.06);font-size:12px;">
+                        <div style="color:#888780;min-width:110px;">${a.tarih}</div>
+                        <div style="color:#1D9E75;min-width:40px;">Mat: ${a.mat}</div>
+                        <div style="color:#378ADD;min-width:40px;">Fiz: ${a.fiz}</div>
+                        <div style="color:#D85A30;min-width:40px;">Kim: ${a.kim}</div>
+                        <div style="color:#1a1a18;font-weight:600;">Ort: ${a.genel}</div>
+                        <button onclick="showPastAdvice(${a.id})" style="margin-left:auto;background:${a.ai ? '#e1f5ee' : '#f5f5f3'};color:${a.ai ? '#0f6e56' : '#aaa'};border:1px solid ${a.ai ? '#9fe1cb' : '#e0e0e0'};border-radius:6px;padding:3px 10px;font-size:11px;font-weight:600;cursor:${a.ai ? 'pointer' : 'default'};">${a.ai ? 'Tavsiyeleri Gör' : 'Tavsiye yok'}</button>
+                    </div>`).join('')}
+            </div>
+        `;
+
+        if (_analyticsChart) { _analyticsChart.destroy(); _analyticsChart = null; }
+        const ctx = document.getElementById('analyticsChart');
+        if (ctx) {
+            _analyticsChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        { label: 'Genel', data: genelData, borderColor: '#1a1a18', backgroundColor: 'rgba(26,26,24,0.05)', tension: 0.3, pointRadius: 4 },
+                        { label: 'Matematik', data: matData, borderColor: '#1D9E75', backgroundColor: 'transparent', tension: 0.3, pointRadius: 3 },
+                        { label: 'Fizik', data: fizData, borderColor: '#378ADD', backgroundColor: 'transparent', tension: 0.3, pointRadius: 3 },
+                        { label: 'Kimya', data: kimData, borderColor: '#D85A30', backgroundColor: 'transparent', tension: 0.3, pointRadius: 3 },
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
+                    scales: {
+                        y: { min: 0, max: 100, ticks: { font: { size: 11 } } },
+                        x: { ticks: { font: { size: 10 }, maxRotation: 30 } }
+                    }
+                }
+            });
+        }
+    }
+    window.showPastAdvice = (analysisId) => {
+        const a = _lastAnalyses.find(x => x.id === analysisId);
+        if (!a || !a.ai) return;
+        const ai = a.ai;
+
+        const dersKonfig = [
+            { key: 'matematik', baslik: ai.matematikDurum, trend: ai.matematikTrend, tavsiyeler: ai.matematikTavsiyeler, renk: '#1D9E75', bg: '#E1F5EE', border: '#9FE1CB' },
+            { key: 'fizik',     baslik: ai.fizikDurum,     trend: ai.fizikTrend,     tavsiyeler: ai.fizikTavsiyeler,     renk: '#E24B4A', bg: '#FCEBEB', border: '#F7C1C1' },
+            { key: 'kimya',     baslik: ai.kimyaDurum,     trend: ai.kimyaTrend,     tavsiyeler: ai.kimyaTavsiyeler,     renk: '#BA7517', bg: '#FAEEDA', border: '#FAC775' },
+        ];
+
+        modalTitle.innerText = `Tavsiyeler — ${a.tarih}`;
+        modalTitle.style.color = '#1a1a18';
+        modalDot.style.backgroundColor = '#1D9E75';
+
+        modalBody.innerHTML = `
+            <button onclick="renderAnalytics(window._lastAnalyses)" style="background:none;border:none;color:#1D9E75;font-size:12px;font-weight:600;cursor:pointer;padding:0 0 12px;display:flex;align-items:center;gap:4px;">← Analizlere Dön</button>
+            <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+                <div style="background:#f5f5f3;border-radius:8px;padding:10px 14px;font-size:12px;"><span style="color:#888780;">Mat:</span> <b style="color:#1D9E75;">${a.mat}</b></div>
+                <div style="background:#f5f5f3;border-radius:8px;padding:10px 14px;font-size:12px;"><span style="color:#888780;">Fiz:</span> <b style="color:#378ADD;">${a.fiz}</b></div>
+                <div style="background:#f5f5f3;border-radius:8px;padding:10px 14px;font-size:12px;"><span style="color:#888780;">Kim:</span> <b style="color:#D85A30;">${a.kim}</b></div>
+                <div style="background:#f5f5f3;border-radius:8px;padding:10px 14px;font-size:12px;"><span style="color:#888780;">Genel:</span> <b>${a.genel}</b></div>
+            </div>
+            ${dersKonfig.map(d => `
+            <div style="border:1px solid ${d.border};border-radius:10px;margin-bottom:12px;overflow:hidden;">
+                <div style="background:${d.bg};padding:10px 14px;font-size:13px;font-weight:600;color:${d.renk};display:flex;justify-content:space-between;">
+                    <span>${d.baslik || ''}</span>
+                    <span style="font-weight:400;font-size:12px;">${d.trend || ''}</span>
+                </div>
+                <div style="padding:10px 14px;">
+                    ${(d.tavsiyeler || []).map(t => `
+                    <div style="display:flex;gap:8px;margin-bottom:8px;font-size:12px;line-height:1.5;color:#1a1a18;">
+                        <div style="width:6px;height:6px;border-radius:50%;background:${d.renk};flex-shrink:0;margin-top:5px;"></div>
+                        <div>${t}</div>
+                    </div>`).join('')}
+                </div>
+            </div>`).join('')}
+        `;
+    };
+    // ── RAPORLAR SON ──────────────────────────────────────
+
+    // ── PROFİL PANELİ ─────────────────────────────────────
+    const profilePanel = document.getElementById('profilePanel');
+    const profileBackdrop = document.getElementById('profileBackdrop');
+
+    async function openProfile() {
+        profileBackdrop.style.display = 'block';
+        profilePanel.style.right = '0';
+        try {
+            const res = await fetch(`${API_BASE}/auth/me`, { headers: authHeaders() });
+            const data = await res.json();
+            const fullName = [data.ad, data.soyad].filter(Boolean).join(" ");
+            const initials = fullName
+                ? (data.ad[0] + (data.soyad ? data.soyad[0] : "")).toUpperCase()
+                : (data.email || "?").slice(0, 2).toUpperCase();
+            document.getElementById('profilePanelAvatar').innerText = initials;
+            document.getElementById('profilePanelEmail').innerText = data.email || "";
+            document.getElementById('profileAd').value = data.ad || "";
+            document.getElementById('profileSoyad').value = data.soyad || "";
+        } catch {}
+        loadGoals();
+    }
+
+    function closeProfile() {
+        profilePanel.style.right = '-420px';
+        profileBackdrop.style.display = 'none';
+    }
+
+    document.getElementById('profileTrigger').addEventListener('click', e => {
+        if (e.target.id === 'logoutBtn') return;
+        openProfile();
+    });
+    document.getElementById('profileClose').addEventListener('click', closeProfile);
+    document.getElementById('profileBackdrop').addEventListener('click', closeProfile);
+
+    document.getElementById('logoutBtnPanel').addEventListener('click', () => {
+        clearToken();
+        window.location.replace('/login');
+    });
+
+    // Ad soyad kaydet
+    document.getElementById('profileSaveBtn').addEventListener('click', async () => {
+        const ad = document.getElementById('profileAd').value.trim();
+        const soyad = document.getElementById('profileSoyad').value.trim();
+        const msgEl = document.getElementById('profileSaveMsg');
+        const btn = document.getElementById('profileSaveBtn');
+        btn.disabled = true; btn.innerText = 'Kaydediliyor...';
+        try {
+            const res = await fetch(`${API_BASE}/auth/profile`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ ad, soyad })
+            });
+            const data = await res.json();
+            if (!res.ok) { msgEl.style.color = '#d94f4f'; msgEl.innerText = data.detail || 'Hata.'; return; }
+            msgEl.style.color = '#1D9E75';
+            msgEl.innerText = 'Kaydedildi!';
+            updateSidebarUser({ ad, soyad, email: document.getElementById('profilePanelEmail').innerText });
+            document.getElementById('profilePanelAvatar').innerText = ad && soyad
+                ? (ad[0] + soyad[0]).toUpperCase()
+                : (ad || soyad || '?')[0].toUpperCase();
+            setTimeout(() => { msgEl.innerText = ''; }, 3000);
+        } catch { msgEl.style.color = '#d94f4f'; msgEl.innerText = 'Bağlanılamadı.'; }
+        finally { btn.disabled = false; btn.innerText = 'Kaydet'; }
+    });
+
+    // Şifre değiştir
+    document.getElementById('pwdSaveBtn').addEventListener('click', async () => {
+        const current = document.getElementById('pwdCurrent').value;
+        const next = document.getElementById('pwdNew').value;
+        const errEl = document.getElementById('pwdError');
+        errEl.innerText = '';
+        if (!current || !next) { errEl.innerText = 'Her iki alan zorunlu.'; return; }
+        const btn = document.getElementById('pwdSaveBtn');
+        btn.disabled = true; btn.innerText = 'Kaydediliyor...';
+        try {
+            const res = await fetch(`${API_BASE}/auth/change-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ current_password: current, new_password: next })
+            });
+            const data = await res.json();
+            if (!res.ok) { errEl.innerText = data.detail || 'Hata oluştu.'; return; }
+            document.getElementById('pwdCurrent').value = '';
+            document.getElementById('pwdNew').value = '';
+            errEl.style.color = '#1D9E75';
+            errEl.innerText = 'Şifre güncellendi!';
+            setTimeout(() => { errEl.innerText = ''; errEl.style.color = '#d94f4f'; }, 3000);
+        } catch { errEl.innerText = 'Sunucuya bağlanılamadı.'; }
+        finally { btn.disabled = false; btn.innerText = 'Şifreyi Güncelle'; }
+    });
+    // ── PROFİL PANELİ SON ─────────────────────────────────
+
+    // ── HEDEFLERİM ────────────────────────────────────────
+
+    async function loadGoals() {
+        try {
+            const res = await fetch(`${API_BASE}/api/goals`, { headers: authHeaders() });
+            if (!res.ok) throw new Error("Hedefler alınamadı");
+            const data = await res.json();
+            renderGoals(data.goals);
+        } catch (err) {
+            modalBody.innerHTML = `<div style="color:#d94f4f;padding:20px;">${err.message}</div>`;
+        }
+    }
+
+    function renderGoals(goals) {
+        const tamamlanan = goals.filter(g => g.tamamlandi).length;
+        modalBody.innerHTML = `
+            <div style="display:flex;gap:8px;margin-bottom:16px;">
+                <input id="goalBaslik" type="text" placeholder="Hedef başlığı..." style="flex:1;border:1px solid rgba(0,0,0,0.18);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;"/>
+                <button id="goalEkleBtn" style="background:#F59E0B;color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">+ Ekle</button>
+            </div>
+            <input id="goalAciklama" type="text" placeholder="Açıklama (isteğe bağlı)..." style="width:100%;border:1px solid rgba(0,0,0,0.18);border-radius:8px;padding:8px 12px;font-size:12px;outline:none;margin-bottom:16px;"/>
+            ${goals.length > 0 ? `<div style="font-size:12px;color:#888780;margin-bottom:10px;">${tamamlanan}/${goals.length} tamamlandı</div>` : ''}
+            <div id="goalsList">
+                ${goals.length === 0 ? `
+                    <div style="text-align:center;padding:30px;color:#888780;">
+                        <div style="font-size:28px;margin-bottom:8px;">🎯</div>
+                        <div>Henüz hedef eklenmedi.</div>
+                    </div>` :
+                goals.map(g => `
+                    <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid rgba(0,0,0,0.07);">
+                        <input type="checkbox" ${g.tamamlandi ? 'checked' : ''} data-id="${g.id}"
+                            style="margin-top:3px;width:16px;height:16px;cursor:pointer;accent-color:#F59E0B;"
+                            onchange="toggleGoal(${g.id}, this.checked)"/>
+                        <div style="flex:1;">
+                            <div style="font-size:13px;font-weight:500;color:#1a1a18;${g.tamamlandi ? 'text-decoration:line-through;color:#888780;' : ''}">${g.baslik}</div>
+                            ${g.aciklama ? `<div style="font-size:12px;color:#888780;margin-top:2px;">${g.aciklama}</div>` : ''}
+                            <div style="font-size:11px;color:#bbb;margin-top:2px;">${g.tarih}</div>
+                        </div>
+                        <button onclick="deleteGoal(${g.id})" style="background:none;border:none;color:#ccc;cursor:pointer;font-size:16px;padding:0 4px;" title="Sil">🗑</button>
+                    </div>`).join('')}
+            </div>
+        `;
+
+        document.getElementById('goalEkleBtn').addEventListener('click', addGoal);
+        document.getElementById('goalBaslik').addEventListener('keydown', e => { if (e.key === 'Enter') addGoal(); });
+    }
+
+    async function addGoal() {
+        const baslik = document.getElementById('goalBaslik').value.trim();
+        const aciklama = document.getElementById('goalAciklama').value.trim();
+        if (!baslik) { document.getElementById('goalBaslik').focus(); return; }
+        try {
+            const res = await fetch(`${API_BASE}/api/goals`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ baslik, aciklama })
+            });
+            if (!res.ok) throw new Error();
+            document.getElementById('goalBaslik').value = '';
+            document.getElementById('goalAciklama').value = '';
+            await loadGoals();
+        } catch { alert('Hedef eklenemedi.'); }
+    }
+
+    window.toggleGoal = async (id, checked) => {
+        await fetch(`${API_BASE}/api/goals/${id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ tamamlandi: checked ? 1 : 0 })
+        });
+        await loadGoals();
+    };
+
+    window.deleteGoal = async (id) => {
+        if (!confirm('Bu hedefi silmek istediğine emin misin?')) return;
+        await fetch(`${API_BASE}/api/goals/${id}`, { method: 'DELETE', headers: authHeaders() });
+        await loadGoals();
+    };
+    // ── HEDEFLERİM SON ────────────────────────────────────

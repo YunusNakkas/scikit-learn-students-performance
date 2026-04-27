@@ -11,6 +11,11 @@ ENV/
 env.bak/
 venv.bak/
 local.env
+gemini_api_key.txt
+
+# Veritabanı ve loglar
+eduai.db
+logs/
 
 # Models & Large Datasets (Uncomment if you want to exclude model files, but since it's an AI project, you might want to keep the small joblib files)
 # *.joblib

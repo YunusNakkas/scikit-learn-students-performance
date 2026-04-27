@@ -6,7 +6,7 @@ import logging
 import threading
 from pathlib import Path
 
-from .ml_context import YENI_CSV
+from .ml_context import CSV_PATH  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def append_analyze_submission(
     Ortalama notlar + rutinleri genişletilmiş CSV'ye bir satır olarak yazar.
     Kayıtları ayırt etmek için test preparation course = eduai_web kullanılır.
     """
-    path = project_root / YENI_CSV
+    path = project_root / CSV_PATH
     if not path.is_file():
         logger.warning("CSV yok, kayıt atlandı: %s", path)
         return False
@@ -52,8 +52,8 @@ def append_analyze_submission(
         "math score": int(ortalamalar["mat"]),
         "physical score": int(ortalamalar["fiz"]),
         "chemical score": int(ortalamalar["kim"]),
-        "study_hours": round(float(calisma_saat), 1),
-        "sleep_hours": round(float(uyku_saat), 1),
+        "study_hours": round(calisma_saat, 1),  # type: ignore
+        "sleep_hours": round(uyku_saat, 1),  # type: ignore
     }
 
     try:
