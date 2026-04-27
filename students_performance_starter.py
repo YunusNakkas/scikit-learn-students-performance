@@ -8,7 +8,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 # 🚨 DİKKAT: API anahtarını buraya eklemeyi unutma
-API_KEY = "AIzaSyAz1YVhIALWUiW7DhYmzSi8CF7CWU7XIt8"
+API_KEY = "kendi api keyin"
 genai.configure(api_key=API_KEY)
 
 CSV_PATH = "StudentsPerformance_Extended.csv"
